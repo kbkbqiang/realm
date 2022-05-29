@@ -5,11 +5,12 @@ use crate::conf::EndpointConf;
 use crate::conf::{Config, LogConf, DnsConf, NetConf};
 
 use crate::VERSION;
-use crate::utils::FEATURES;
+use crate::consts::FEATURES;
 
 mod sub;
 mod flag;
 
+#[allow(clippy::large_enum_variant)]
 pub enum CmdInput {
     Config(String, CmdOverride),
     Endpoint(EndpointConf, CmdOverride),
@@ -62,38 +63,46 @@ pub fn scan() -> CmdInput {
 fn handle_matches(matches: ArgMatches) -> CmdInput {
     #[cfg(unix)]
     if matches.is_present("daemon") {
-        crate::utils::daemonize();
+        realm_syscall::daemonize("realm is running in the background");
     }
 
     #[cfg(all(unix, not(target_os = "android")))]
     {
-        use crate::utils::get_nofile_limit;
-        use crate::utils::set_nofile_limit;
-
-        // get
-        if let Some((soft, hard)) = get_nofile_limit() {
-            println!("nofile limit: soft={}, hard={}", soft, hard);
-        }
+        use realm_syscall::{get_nofile_limit, set_nofile_limit};
 
         // set
         if let Some(nofile) = matches.value_of("nofile") {
             if let Ok(nofile) = nofile.parse::<u64>() {
-                set_nofile_limit(nofile);
+                let _ = set_nofile_limit(nofile);
             } else {
                 eprintln!("invalid nofile value: {}", nofile);
             }
         }
+
+        // get
+        if let Ok((soft, hard)) = get_nofile_limit() {
+            println!("fd: soft={}, hard={}", soft, hard);
+        }
     }
 
-    #[cfg(all(target_os = "linux", feature = "zero-copy"))]
+    #[cfg(all(target_os = "linux"))]
     {
-        use crate::utils::set_pipe_cap;
+        use realm_io::set_pipe_size;
 
         if let Some(page) = matches.value_of("pipe_page") {
             if let Ok(page) = page.parse::<usize>() {
-                set_pipe_cap(page * 0x1000);
+                set_pipe_size(page * 0x1000);
                 println!("pipe capacity: {}", page * 0x1000);
             }
+        }
+    }
+
+    #[cfg(feature = "hook")]
+    {
+        use realm_core::hook::load_pre_conn_hook;
+        if let Some(path) = matches.value_of("pre_conn_hook") {
+            load_pre_conn_hook(path);
+            println!("hook: {}", path);
         }
     }
 
@@ -103,9 +112,7 @@ fn handle_matches(matches: ArgMatches) -> CmdInput {
         return CmdInput::Config(String::from(config), opts);
     }
 
-    if matches.value_of("local").is_some()
-        && matches.value_of("remote").is_some()
-    {
+    if matches.value_of("local").is_some() && matches.value_of("remote").is_some() {
         let ep = EndpointConf::from_cmd_args(&matches);
         return CmdInput::Endpoint(ep, opts);
     }
